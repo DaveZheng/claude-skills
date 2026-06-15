@@ -1,0 +1,11 @@
+# Machine-specific / plugin-managed skills (each recreated by its own installer).
+# nia is a symlink into ~/.crust — committing it would be a broken absolute path elsewhere.
+nia
+
+# OS / editor cruft
+.DS_Store
+*.swp
+*~
+
+# Local-only experiments you don't want synced: name a skill dir *.local
+*.local/
