@@ -12,8 +12,15 @@ instructions body). Claude loads them automatically; invoke with `/<skill-name>`
 | Skill | What it does |
 |-------|--------------|
 | `confer-with-codex` | Get a second opinion from OpenAI Codex (`codex exec`, read-only) on the current approach, then triage its reply into pointers / conflicts / redesign. `--fast` / `--deep` / `--diff`. |
+| `codex-adversarial-review` | Adversarial, multi-agent code review that runs on OpenAI Codex instead of Claude (find → verify → synthesize). Divests review spend from Anthropic; Claude only launches + triages. |
+| `codex-e2e-test` | Dynamic AI E2E test flow run on OpenAI Codex instead of Claude — analyze diff → trace to frontend → drive Playwright MCP → report to Slack. The 1:1 Codex counterpart of `e2e-test`; divests E2E spend from Anthropic. |
 | `contributions` | Summarize my git contributions grouped by feature/bug/addition with business context. |
 | `sync-perms` | Sync whitelisted permissions from the current worktree back to the main checkout. |
+
+The `codex-*` skills run their heavy work inside `codex exec` (OpenAI credits) and install a
+companion prompt into `~/.codex/prompts/` (a symlink back into this repo, so it doubles as a
+native Codex slash-command). Each skill's `SKILL.md` has an **Install** step with the exact
+`ln -sf` commands; run it once per machine after syncing this repo.
 
 ## Set up on a new machine
 
