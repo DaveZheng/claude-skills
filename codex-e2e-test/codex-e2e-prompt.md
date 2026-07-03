@@ -52,7 +52,7 @@ The rule for what may become a static spec:
 How golden paths interact with a run:
 
 - **`golden` mode** (Mode: golden): skip Steps 3–5 and the browser entirely. Run the deterministic runner and report its result: `cd e2e && E2E_BASE_URL=<target> npx playwright test`. Login + workspace pinning are handled by `support/auth.setup.ts`. Parse pass/fail/skip; for any failure do **fail-triage** (below). Report header: `E2E Golden Paths (Codex)`.
-- **Every normal run:** after Step 5, also run the golden specs whose `paths` globs intersect the diff (or whose `areas` overlap the impact summary): `cd e2e && E2E_BASE_URL=<target> npx playwright test <id>...`. Report them as `[golden]` alongside your dynamic scenarios.
+- **Every normal run:** run the matched golden specs FIRST, before designing or executing any dynamic scenario — they are the deterministic baseline. Resolve the match with the deterministic matcher (never by judgment) — it takes changed files as args, on stdin, or via `--base <ref>`: `node e2e/golden-paths/support/match-specs.mjs <changed files...>` (or `<diff file list> | node e2e/golden-paths/support/match-specs.mjs`, or `--base main`), then `cd e2e && E2E_BASE_URL=<target> npx playwright test <matched ids>`. Report them as `[golden]`; a PASSING matched spec's behavior must NOT be re-tested dynamically (it's covered ground), and a FAILING one gets fail-triage at the end of the run, not a hand-driven redo.
 - **Fail-triage (drift vs regression).** When a golden spec fails, decide which:
   - **UI drift** (selector/label/flow changed, behavior still correct per the diff/intent) → *heal the spec*: reproduce the flow dynamically with Playwright MCP to find the new interaction, update the `.spec.ts` (or shared `support/helpers.ts`), re-run to green, report 🔁 Healed. Put reusable healing recipes in `support/helpers.ts`.
   - **Real regression** (behavior contradicts intent/PR) → report ❌ with evidence; do NOT edit the spec to make it pass.
@@ -82,17 +82,18 @@ For each changed area:
 
 Produce a **structured impact summary** before designing scenarios. For each feature area: **what changed** (files/functions/endpoints) · **what UI surface it affects** · **what to test** (the specific new/changed behavior a user would see). Every entry becomes at least one scenario.
 
-## Step 5: Design scenarios
+## Step 5: Design scenarios — adversarial or worthless
 
-- **No hard cap** — as many as the changes warrant. Each is a multi-step user flow, not a single-page check.
-- **"Page loads" is not a test.** Every scenario interacts with the feature and verifies specific behavior.
-- **Every scenario traces to a change.** If you can't point to a diff line it validates, cut it.
-- **Scale with PR size:** 1–5 files → 3–5 scenarios; 5–20 → 5–10; 20+ → 10–20+. A large multi-area PR needs 3+ scenarios per area minimum.
-- **Test the NEW thing, not the surrounding UI.**
+The single biggest failure mode of AI E2E runs is a matrix designed to pass: happy paths over flows the developer just tested by hand. Design to BREAK the change:
 
-Write out the scenario list, then self-review: (1) does each test a *specific behavior introduced by this PR*? (2) could the app *without* this PR also pass it? (if yes, it's testing the wrong thing) (3) is the count proportional to the change? Revise before executing.
+- **Break-it quota: at most half the scenarios may be happy-path.** The rest must be drawn from: negative/error-path, boundary, interruption (refresh/cancel/navigate-away mid-flow), concurrency (double-click, double-submit, second tab), state-pollution (re-run the flow, pre-existing data, empty states), input-abuse (very long strings, unicode, markup-ish text, whitespace-only), cross-feature interaction.
+- **Hunt fragilities while tracing (Step 4)** — missing/changed error handling, unvalidated input, async races, optimistic UI without rollback, boundary/empty-state gaps — and convert every credible one into a scenario. Those are your best shots at a real ❌.
+- **Every scenario is falsifiable:** write a `failsIf` — the concrete observable outcome that fails it. No plausible failsIf → filler → cut. "Page loads" is not a test.
+- **Every scenario traces to a change** (name the diff lines). A scenario the pre-PR app would also pass is testing the wrong thing (exception: cross-feature/state-pollution exercising a fragility the diff plausibly introduced).
+- **Don't re-test golden-covered ground:** behaviors already asserted by a PASSING matched golden spec (baseline, Step "Golden paths") are excluded — list them as exclusions in the report.
+- **Scale with PR size:** 1–5 files → 4–6 scenarios; 5–20 → 6–12; 20+ → 12–20+.
 
-Also run matching golden specs (Step 5 of "Golden paths") — report as `[golden]`, not counted in the diff-proportional counts.
+Write out the scenario list, then self-review: (1) does each test a *specific behavior introduced by this PR*? (2) could the app *without* this PR also pass it? (3) is at least half the matrix genuinely trying to break the change, with a real failsIf? Revise before executing.
 
 ## Step 6: Log in
 
@@ -158,12 +159,12 @@ set -a && . e2e/.env && set +a && python3 e2e/slack_helper.py scenario \
 
 **Be strict with verdicts:**
 
-- ✅ **Pass** — behavior matches the PR's stated intent
-- ❌ **Fail** — behavior contradicts the PR's stated intent, or something is broken
+- ✅ **Pass** — behavior matches the PR's stated intent AND the scenario's `failsIf` was actually exercised without triggering. A pass where the break attempt was skipped or approximated is ⚠️, not ✅.
+- ❌ **Fail** — behavior contradicts the PR's stated intent, a break attempt landed, or something is broken. Console errors and 4xx/5xx responses observed during a flow count as evidence — check `browser_console_messages` / `browser_network_requests` per scenario, not just the screenshot.
 - ⚠️ **Partial** — intent is genuinely ambiguous and behavior is arguably correct
 - 🔁 **Healed** — `[golden]` specs only (UI-drift heal per fail-triage); never to mask a regression, never in `golden` mode without the user's OK
 
-**Before reporting ❌:** understand the expected outcome from the *product* perspective, not just the diff. Is the behavior an intentional safety guard, design constraint, or architectural choice? Read the relevant constants/config/guards to confirm. A working safety mechanism is a pass, not a fail — misidentifying it wastes everyone's time. If a scenario fails, screenshot the failure state, post it, then continue with the rest.
+**Before reporting ❌:** understand the expected outcome from the *product* perspective, not just the diff. Is the behavior an intentional safety guard, design constraint, or architectural choice? Read the relevant constants/config/guards to confirm. A working safety mechanism is a pass, not a fail — but you may only flip a ❌ to ✅ by citing the specific code that makes the behavior intentional; "probably intentional" without a citation stays ❌. The symmetric rule guards ✅: never soften a contradiction into ⚠️ because the intent "might" differ — if observed behavior contradicts the stated intent, it's ❌. If a scenario fails, screenshot the failure state, post it, then continue with the rest.
 
 ## Step 9: Wrap up
 
@@ -173,15 +174,20 @@ After all scenarios: `browser_close`, then upload the video and finalize the sum
 # find any recorded video (best-effort — current @playwright/mcp may not record one)
 find /tmp/e2e-recordings -name "*.webm" -type f
 set -a && . e2e/.env && set +a && python3 e2e/slack_helper.py video "/tmp/e2e-recordings/page-XXXX.webm"   # only if one exists
+# Build the body as plain Slack mrkdwn: one result per line with a leading ✅/❌, *bold* for
+# emphasis, and <url|label> links. Do NOT use code fences (triple-backtick) or inline backticks —
+# a backtick inside a zsh -lc single-quoted argument mangles the escaping and posts literal
+# quote/backslash garbage into Slack. A ✅/❌ list also reads better in a DM than an ASCII table.
 set -a && . e2e/.env && set +a && python3 e2e/slack_helper.py update-summary \
   "E2E Report (Codex): PR #NNN — 3 ✅ 1 ❌" \
-  "*Target:* … • *Branch:* feat/foo @ abc1234 • *PR:* <url|#NNN>
-\`\`\`
-#  Scenario                 Result
-1  Memory settings display   ✅ Pass
-2  Save memory tool card     ❌ Fail
-3  List memories format      ✅ Pass
-\`\`\`"
+  "*Target:* <url|pr-NNN>   •   *PR:* <url|#NNN>
+*Branch:* feat/foo @ abc1234
+
+✅  Memory settings display
+❌  Save memory tool card
+✅  List memories format
+
+*Checks* — unit 30/30 · golden n/a"
 ```
 
 If the app was unreachable or login failed, you already reported it — don't wait until the end.
@@ -199,7 +205,7 @@ Decide whether this run's changes earn a permanent **deterministic spec** in `e2
 
 To promote a static journey, author BOTH `e2e/golden-paths/<id>.md` (intent + frontmatter, `lane: platform`, `paths` at directory granularity from the diff) and `e2e/golden-paths/<id>.spec.ts` (codegen from the flow you just ran; reuse/extend `support/helpers.ts` for smoke-web quirks — Lexical composer, hover-gated tree, inline-rename commit). **Then RUN it** (`cd e2e && E2E_BASE_URL=<target> npx playwright test <id>`) and keep it only if green; if a flow resists determinism, commit it as `test.fixme` with a one-line blocker rather than a flaky gate.
 
-- On the tested branch (local run / the author's own PR): commit both files, message `e2e: promote <id> to golden paths`.
+- On the tested branch (local run / the author's own PR): write both files but commit NOTHING — leave them uncommitted in the working tree and list them in your report for the user to review and commit.
 - Testing someone else's PR env from another branch: do NOT write files — list under **Golden path candidates** in your report with proposed `id`, `lane`, `paths`, steps.
 
 Demotion is symmetric: if a journey is obsolete, update or delete both files. Note curation on its own report line, e.g. `📌 Promoted sheet-build-from-apollo (platform) — spec green, 7/20 slots used`.
