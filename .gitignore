@@ -9,3 +9,4 @@ nia
 
 # Local-only experiments you don't want synced: name a skill dir *.local
 *.local/
+.codex-review/

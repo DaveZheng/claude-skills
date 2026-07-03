@@ -29,6 +29,8 @@
 //   -j, --concurrency <n>   max parallel codex calls (default 6)
 //   -o, --out <dir>         artifact dir (default <repo>/.codex-review/<ts>)
 //   --dry-run               print plan + call count, spend nothing
+//   --no-cap                report EVERY verified finding, ignoring the tier's report cap
+//                           (finders' per-angle caps still apply; use for fix-everything passes)
 //   -h, --help
 
 import { spawn, execFileSync } from 'node:child_process';
@@ -229,7 +231,7 @@ const CODEX_EFFORT = { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh
 
 // ==== args =================================================================
 const argv = process.argv.slice(2);
-const opt = { source: { kind: 'uncommitted' }, cd: process.cwd(), model: 'gpt-5.5', verifyModel: null, effort: 'high', votes: 1, concurrency: 6, out: null, dryRun: false, engine: 'orchestrated' };
+const opt = { source: { kind: 'uncommitted' }, cd: process.cwd(), model: 'gpt-5.5', verifyModel: null, effort: 'high', votes: 1, concurrency: 6, out: null, dryRun: false, engine: 'orchestrated', noCap: false };
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   const next = () => { const v = argv[++i]; if (v === undefined || (v.startsWith('-') && v !== '-')) fail(`${a} requires a value`); return v; };
@@ -246,6 +248,7 @@ for (let i = 0; i < argv.length; i++) {
     case '-j': case '--concurrency': opt.concurrency = parseInt(next(), 10); break;
     case '-o': case '--out': opt.out = next(); break;
     case '--dry-run': opt.dryRun = true; break;
+    case '--no-cap': opt.noCap = true; break;
     case '-h': case '--help': printHelp(); process.exit(0);
     default: fail(`unknown argument: ${a} (try --help)`);
   }
@@ -351,7 +354,8 @@ const VERDICT_SCHEMA = { type: 'object', additionalProperties: false, required: 
 // native-engine final output = the ReportFindings input shape (findings carry a verdict post-verify)
 const VERIFIED_ITEM = { ...FINDING_ITEM, required: [...FINDING_ITEM.required, 'verdict'], properties: { ...FINDING_ITEM.properties, verdict: { type: 'string', enum: ['CONFIRMED', 'PLAUSIBLE'], description: 'Set when a verify pass ran' } } };
 // codex --output-schema is strict: `required` must list EVERY property. Keep both required and instruct the model to emit `level`.
-const REPORT_SCHEMA = { type: 'object', additionalProperties: false, required: ['level', 'findings'], properties: { level: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max'] }, findings: { type: 'array', maxItems: 32, items: VERIFIED_ITEM } } };
+// maxItems must track --no-cap: a schema cap would silently truncate what the prompt asks for in full.
+const REPORT_SCHEMA = { type: 'object', additionalProperties: false, required: ['level', 'findings'], properties: { level: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max'] }, findings: { type: 'array', ...(opt.noCap ? {} : { maxItems: 32 }), items: VERIFIED_ITEM } } };
 
 // ==== prompt builders ======================================================
 const finderPrompt = (angle, cap, diff) => `${LSt}
@@ -395,7 +399,7 @@ ${untrusted(diff)}`;
 const lowPrompt = (diff) => `${LSt}
 
 ${Zvl}
-
+${opt.noCap ? '\n(--no-cap override: ignore the 4-finding cap above — output EVERY qualifying finding, still most-severe first.)\n' : ''}
 ${untrusted(diff)}`;
 
 // native engine: reconstruct the inline effort cell verbatim, pointing "the finder/verifier tool"
@@ -403,14 +407,14 @@ ${untrusted(diff)}`;
 function buildCell(diff) {
   const nCorr = tier.angles.filter(k => ANGLES.find(a => a.key === k).kind === 'correctness').length;
   const nAngles = tier.angles.length;
-  const header = `\`${opt.effort} effort → ${nCorr}+5 angles × ${tier.perAngle} candidates → 1-vote verify${tier.sweep ? ' → sweep' : ''} → ≤${tier.findingsCap} findings\``;
+  const header = `\`${opt.effort} effort → ${nCorr}+5 angles × ${tier.perAngle} candidates → 1-vote verify${tier.sweep ? ' → sweep' : ''} → ${opt.noCap ? 'ALL verified' : `≤${tier.findingsCap}`} findings\``;
   const phase1 = `## Phase 1 — Find candidates (${nCorr} correctness angles + 3 cleanup angles + 1 altitude angle + 1 conventions angle, up to ${tier.perAngle} each)
 Run **${nAngles} independent finder angles** via the spawn_agent tool. When spawning: create a FRESH sub-agent per angle (NOT a full-history fork), pass only that angle's instructions plus the diff as the task, and OMIT agent_type, model, and reasoning_effort (sub-agents inherit yours). Give each a distinct task_name. Each surfaces **up to ${tier.perAngle} candidate findings** with \`file\`, \`line\`, a one-line \`summary\`, and a concrete \`failure_scenario\`.${tier.sweep ? '\nDo NOT let one angle\'s conclusions suppress another\'s — if two angles flag the same line for different reasons, record both.' : ''}`;
   const angleBodies = tier.angles.map(k => ANGLES.find(a => a.key === k).body).join('\n\n');
   const verify = tier.bias === 'high' ? QAM : XVL;
   const recallNote = tier.recallKeep ? '\nThis is recall mode — a single non-REFUTED vote carries the finding. Do NOT drop on uncertainty.' : '';
   const output = `## Output
-Return your final structured output with \`level\` set to "${opt.effort}" and \`findings\` = the surviving verified findings: at most ${tier.findingsCap}, ranked most-severe first, correctness always before cleanup. Each finding has \`file\`, \`line\`, \`summary\`, \`failure_scenario\`, and \`verdict\` (CONFIRMED or PLAUSIBLE). If nothing survives, return an empty findings array.`;
+Return your final structured output with \`level\` set to "${opt.effort}" and \`findings\` = the surviving verified findings: ${opt.noCap ? 'every one that survived (no cap)' : `at most ${tier.findingsCap}`}, ranked most-severe first, correctness always before cleanup. Each finding has \`file\`, \`line\`, \`summary\`, \`failure_scenario\`, and \`verdict\` (CONFIRMED or PLAUSIBLE). If nothing survives, return an empty findings array.`;
   return `${header}
 ${BIAS[tier.bias]}
 ${LSt}
@@ -456,7 +460,7 @@ console.error(`  source:  ${label}  (${diffKB} KB)`);
 console.error(`  model:   ${opt.model}${nativeMulti ? '' : ` (verify ${opt.verifyModel})`} @ ${codexEffort}`);
 console.error(`  plan:    ${opt.effort === 'low' ? '1 diff pass, no verify'
   : nativeMulti ? `1 codex agent drives ${finderAngles.length} spawn_agent finders → verify${tier.sweep ? ' → sweep' : ''}`
-  : `${finderAngles.length} angle finders → ${opt.votes}-vote 3-state verify${tier.sweep ? ' → sweep' : ''}`} → ≤${tier.findingsCap}`);
+  : `${finderAngles.length} angle finders → ${opt.votes}-vote 3-state verify${tier.sweep ? ' → sweep' : ''}`} → ${opt.noCap ? 'ALL verified (--no-cap)' : `≤${tier.findingsCap}`}`);
 if (nativeMulti && opt.votes > 1) console.error(`  note:    --votes ${opt.votes} ignored in native engine (Codex drives 1-vote verify).`);
 if (nativeMulti && opt.verifyModel !== opt.model) console.error(`  note:    --verify-model ignored in native engine (sub-agents inherit the main model).`);
 
@@ -477,7 +481,7 @@ if (nativeMulti) {
   console.error(`\n[native] one codex agent orchestrating spawn_agent sub-agents...\n`);
   const r = await runNative(buildCell(diff), REPORT_SCHEMA);
   if (!r.ok) fail(`native run failed: ${r.error}`);
-  const nf = (r.data.findings || []).slice(0, tier.findingsCap); // cap to tier limit, like the orchestrated path
+  const nf = opt.noCap ? (r.data.findings || []) : (r.data.findings || []).slice(0, tier.findingsCap); // cap to tier limit, like the orchestrated path
   writeReport(nf, nf.length);
   process.exit(0);
 }
@@ -487,7 +491,7 @@ if (opt.effort === 'low') {
   console.error(`\n[low] single diff pass...`);
   const r = await codexExec(lowPrompt(diff), FINDING_SCHEMA);
   if (!r.ok) fail(`review did not run: ${r.error}`); // infra failure is not a clean, zero-finding review
-  const found = (r.data.findings || []).slice(0, tier.findingsCap).map(f => ({ ...f, kind: 'correctness' }));
+  const found = (opt.noCap ? (r.data.findings || []) : (r.data.findings || []).slice(0, tier.findingsCap)).map(f => ({ ...f, kind: 'correctness' }));
   writeReport(found, found.length);
   process.exit(0);
 }
@@ -555,7 +559,10 @@ if (tier.sweep) {
 // rank: correctness before cleanup, CONFIRMED before PLAUSIBLE
 const rk = f => (f.kind === 'correctness' ? 0 : 10) + (f.verdict === 'PLAUSIBLE' ? 1 : 0);
 kept.sort((a, b) => rk(a) - rk(b));
-writeReport(kept.slice(0, tier.findingsCap), candidates.length);
+// --no-cap: persist EVERY verified survivor (still ranked). The tier cap is
+// Claude-report parity, but a capped findings.json silently discards verified
+// findings with no way to recover them — wrong when the goal is fix-everything.
+writeReport(opt.noCap ? kept : kept.slice(0, tier.findingsCap), candidates.length);
 process.exit(0);
 
 // ==== helpers ==============================================================
@@ -590,7 +597,7 @@ async function verifyAll(cands) {
 function writeReport(findings, nCand) {
   // findings.json matches ReportFindings input: { level, findings:[{file,line,summary,failure_scenario,verdict}] }
   const payload = { level: opt.effort, findings: findings.map(({ file, line, summary, failure_scenario, verdict, unverified }) => ({ file, line, summary, failure_scenario, ...(verdict && !unverified ? { verdict } : {}) })) };
-  const L = [`# Code review (Codex 1:1 port) — ${opt.effort}`, '', `- **Source:** ${label}`, `- **Model:** ${opt.model} @ ${codexEffort} · **candidates:** ${nCand} → **findings:** ${findings.length} (cap ${tier.findingsCap})`, ''];
+  const L = [`# Code review (Codex 1:1 port) — ${opt.effort}`, '', `- **Source:** ${label}`, `- **Model:** ${opt.model} @ ${codexEffort} · **candidates:** ${nCand} → **findings:** ${findings.length} (${opt.noCap ? 'uncapped' : `cap ${tier.findingsCap}`})`, ''];
   if (warnings.length) { L.push(`> ⚠ ${warnings.length} run warning(s) — results may be incomplete:`); for (const w of warnings) L.push(`> - ${w}`); L.push(''); }
   if (!findings.length) L.push('No findings survived verification.');
   for (const f of findings) {
