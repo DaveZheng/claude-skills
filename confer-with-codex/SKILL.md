@@ -35,9 +35,9 @@ If a later `codex exec` fails with an auth error, tell the user to run `codex lo
 
 ## Step 2 — Build the brief and run the consult (single Bash call)
 
-Do the brief-write and the run in **one Bash invocation** so the temp dir and `trap` cleanup live in the same shell. Codex runs **inside the repo with read access to the working tree** — point it at file paths and let it read; don't paste large code blobs.
+Codex runs **inside the repo with read access to the working tree** — point it at file paths and let it read; don't paste large code blobs.
 
-Set the Bash tool `timeout` to match the mode: **180000** (`--fast`), **600000** (default), **900000** (`--deep`).
+**Run mode is non-negotiable:** `--fast` may run foreground (Bash `timeout: 180000`). Default and `--deep` MUST run with Bash `run_in_background: true` — the foreground timeout hard-caps at 10 min and a killed run wastes the whole consult. For background runs, write the brief and the `-o` reply file to a **persistent** location (the session scratchpad), NOT a `mktemp` dir with `trap` cleanup (the trap deletes the reply if the shell dies); launch, then triage when the completion notification arrives.
 
 Set `MODE` and `WANT_DIFF`, fill the `<...>` placeholders in the heredoc from the conversation, then run:
 
@@ -47,9 +47,12 @@ umask 077
 MODE="default"             # "fast" | "deep" | "default"  (per the user's flag)
 WANT_DIFF=0                # 1 if --diff
 
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/codex-consult.XXXXXX")"
-trap 'rm -rf "$TMP_DIR"' EXIT
-BRIEF="$TMP_DIR/brief.md"; REPLY="$TMP_DIR/reply.md"
+# Persistent dir (session scratchpad) so a killed/backgrounded run never loses the reply.
+# Only fast mode (foreground, seconds) may clean up on exit.
+CONSULT_DIR="<session scratchpad>/codex-consult-$$"   # substitute the real scratchpad path
+mkdir -p "$CONSULT_DIR"
+[ "$MODE" = "fast" ] && trap 'rm -rf "$CONSULT_DIR"' EXIT
+BRIEF="$CONSULT_DIR/brief.md"; REPLY="$CONSULT_DIR/reply.md"
 
 case "$MODE" in
   fast) MODEL="gpt-5.4-mini"; EFFORT="low" ;;
@@ -107,11 +110,11 @@ if [ "$WANT_DIFF" = "1" ]; then
     if printf '%s\n' "$CHANGED" | grep -iE "$SENSITIVE_RE" >/dev/null; then
       printf '\n## Uncommitted changes\n(diff withheld — touches sensitive paths; paths only)\n```\n%s\n```\n' "$CHANGED" >> "$BRIEF"
     else
-      git -C "$REPO_ROOT" --no-pager diff --no-ext-diff --no-textconv HEAD > "$TMP_DIR/diff.txt" 2>/dev/null
+      git -C "$REPO_ROOT" --no-pager diff --no-ext-diff --no-textconv HEAD > "$CONSULT_DIR/diff.txt" 2>/dev/null
       { printf '\n## Uncommitted changes\n### status\n```\n%s\n```\n### diffstat\n```\n' "$CHANGED";
         git -C "$REPO_ROOT" --no-pager diff --stat HEAD; printf '```\n'; } >> "$BRIEF"
-      if [ "$(wc -c < "$TMP_DIR/diff.txt")" -lt 60000 ]; then
-        { printf '### diff (vs HEAD; untracked files not shown — name them above if relevant)\n```diff\n'; cat "$TMP_DIR/diff.txt"; printf '\n```\n'; } >> "$BRIEF"
+      if [ "$(wc -c < "$CONSULT_DIR/diff.txt")" -lt 60000 ]; then
+        { printf '### diff (vs HEAD; untracked files not shown — name them above if relevant)\n```diff\n'; cat "$CONSULT_DIR/diff.txt"; printf '\n```\n'; } >> "$BRIEF"
       else
         printf '(diff >60KB omitted — inspect the files directly via the paths above)\n' >> "$BRIEF"
       fi
