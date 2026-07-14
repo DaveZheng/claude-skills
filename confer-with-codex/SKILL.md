@@ -11,7 +11,7 @@ You are conferring with **Codex (OpenAI's CLI agent, model GPT-5.6 Sol)** to get
 /confer-with-codex                  → infer the question from the current task/approach in this conversation
 /confer-with-codex <focus>          → ask about a specific thing, e.g. "the retry/backoff design in append.ts"
 /confer-with-codex --diff           → focus the consult on the current uncommitted changes
-/confer-with-codex --fast [focus]   → quick sanity check: gpt-5.4-mini, low effort (~seconds, cheap)
+/confer-with-codex --fast [focus]   → quick sanity check: gpt-5.4-mini, low effort (cheap; still background)
 /confer-with-codex --deep [focus]   → max reasoning: gpt-5.6-sol, xhigh effort (slow, for hard/high-stakes calls)
 ```
 
@@ -23,7 +23,7 @@ Default (no flag) = gpt-5.6-sol at **high** effort. Flags compose: `/confer-with
 - When you're **stuck** or weighing two approaches and want an independent read.
 - To **pressure-test a risky change** before pushing.
 
-Not for trivial edits or things you're already confident about. One consult per decision — not in a tight loop. Each call spins up a full agent (`--fast` is seconds; default/`--deep` can be minutes).
+Not for trivial edits or things you're already confident about. One consult per decision — not in a tight loop. Each call spins up a full agent (all modes run in the background — even `--fast` takes minutes).
 
 ## Step 1 — Precheck
 
@@ -37,7 +37,7 @@ If a later `codex exec` fails with an auth error, tell the user to run `codex lo
 
 Codex runs **inside the repo with read access to the working tree** — point it at file paths and let it read; don't paste large code blobs.
 
-**Run mode is non-negotiable:** `--fast` may run foreground (Bash `timeout: 180000`). Default and `--deep` MUST run with Bash `run_in_background: true` — the foreground timeout hard-caps at 10 min and a killed run wastes the whole consult. For background runs, write the brief and the `-o` reply file to a **persistent** location (the session scratchpad), NOT a `mktemp` dir with `trap` cleanup (the trap deletes the reply if the shell dies); launch, then triage when the completion notification arrives.
+**Run mode is non-negotiable:** EVERY consult — `--fast` included — runs with Bash `run_in_background: true`. The foreground timeout hard-caps at 10 min and a killed run wastes the whole consult; even "fast" runs are not reliably fast. Write the brief and the `-o` reply file to a **persistent** location (the session scratchpad), NOT a `mktemp` dir with `trap` cleanup (the trap deletes the reply if the shell dies); launch, then triage when the completion notification arrives.
 
 Set `MODE` and `WANT_DIFF`, fill the `<...>` placeholders in the heredoc from the conversation, then run:
 
@@ -48,10 +48,9 @@ MODE="default"             # "fast" | "deep" | "default"  (per the user's flag)
 WANT_DIFF=0                # 1 if --diff
 
 # Persistent dir (session scratchpad) so a killed/backgrounded run never loses the reply.
-# Only fast mode (foreground, seconds) may clean up on exit.
+# NO trap cleanup in any mode — every mode runs in the background.
 CONSULT_DIR="<session scratchpad>/codex-consult-$$"   # substitute the real scratchpad path
 mkdir -p "$CONSULT_DIR"
-[ "$MODE" = "fast" ] && trap 'rm -rf "$CONSULT_DIR"' EXIT
 BRIEF="$CONSULT_DIR/brief.md"; REPLY="$CONSULT_DIR/reply.md"
 
 case "$MODE" in
