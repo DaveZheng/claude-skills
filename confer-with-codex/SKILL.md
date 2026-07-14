@@ -1,9 +1,9 @@
 ---
 name: confer-with-codex
-description: Get a second opinion from OpenAI Codex (GPT-5.5) on the current approach. Packages a compressed brief — problem, the direction you're taking, the specific question — runs `codex exec` read-only (Codex reads the repo, never edits), then triages its reply claim-by-claim into POINTERS (refinements to fold in), CONFLICTS (decisions it disputes — you adjudicate), or REDESIGN (it rejects the whole approach — stop and check with the user). Supports `--fast` (cheap mini pass) and `--deep` (max xhigh reasoning). Use before committing to a non-trivial design, when stuck, or to pressure-test a risky change.
+description: Get a second opinion from OpenAI Codex (GPT-5.6 Sol) on the current approach. Packages a compressed brief — problem, the direction you're taking, the specific question — runs `codex exec` read-only (Codex reads the repo, never edits), then triages its reply claim-by-claim into POINTERS (refinements to fold in), CONFLICTS (decisions it disputes — you adjudicate), or REDESIGN (it rejects the whole approach — stop and check with the user). Supports `--fast` (cheap mini pass) and `--deep` (max xhigh reasoning). Use before committing to a non-trivial design, when stuck, or to pressure-test a risky change.
 ---
 
-You are conferring with **Codex (OpenAI's CLI agent, model GPT-5.5)** to get an independent second opinion on the work in progress, then deciding what to do with what it says. Codex is a peer reviewer, not an editor: it reads and reasons, **you** keep ownership of the code and the decision.
+You are conferring with **Codex (OpenAI's CLI agent, model GPT-5.6 Sol)** to get an independent second opinion on the work in progress, then deciding what to do with what it says. Codex is a peer reviewer, not an editor: it reads and reasons, **you** keep ownership of the code and the decision.
 
 ## Usage
 
@@ -12,10 +12,10 @@ You are conferring with **Codex (OpenAI's CLI agent, model GPT-5.5)** to get an 
 /confer-with-codex <focus>          → ask about a specific thing, e.g. "the retry/backoff design in append.ts"
 /confer-with-codex --diff           → focus the consult on the current uncommitted changes
 /confer-with-codex --fast [focus]   → quick sanity check: gpt-5.4-mini, low effort (~seconds, cheap)
-/confer-with-codex --deep [focus]   → max reasoning: gpt-5.5, xhigh effort (slow, for hard/high-stakes calls)
+/confer-with-codex --deep [focus]   → max reasoning: gpt-5.6-sol, xhigh effort (slow, for hard/high-stakes calls)
 ```
 
-Default (no flag) = gpt-5.5 at **high** effort. Flags compose: `/confer-with-codex --deep --diff`.
+Default (no flag) = gpt-5.6-sol at **high** effort. Flags compose: `/confer-with-codex --deep --diff`.
 
 ## When to use it
 
@@ -53,8 +53,8 @@ BRIEF="$TMP_DIR/brief.md"; REPLY="$TMP_DIR/reply.md"
 
 case "$MODE" in
   fast) MODEL="gpt-5.4-mini"; EFFORT="low" ;;
-  deep) MODEL="gpt-5.5";      EFFORT="xhigh" ;;
-  *)    MODEL="gpt-5.5";      EFFORT="high" ;;
+  deep) MODEL="gpt-5.6-sol";  EFFORT="xhigh" ;;
+  *)    MODEL="gpt-5.6-sol";  EFFORT="high" ;;
 esac
 
 if REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then IS_GIT=1; else REPO_ROOT="$PWD"; IS_GIT=0; fi
@@ -131,7 +131,9 @@ if [ ! -s "$REPLY" ]; then echo "codex returned an EMPTY reply — treat as inva
 echo "=== CODEX REPLY ==="; cat "$REPLY"
 ```
 
-Flag notes: `--sandbox read-only` (consults, never edits — never raise it). `--ephemeral` (no persisted session files). `-C` gives Codex the repo as its root. Effort is **always passed explicitly** — gpt-5.5's own default is `medium`, so relying on it wouldn't deliver "high".
+Flag notes: `--sandbox read-only` (consults, never edits — never raise it). `--ephemeral` (no persisted session files). `-C` gives Codex the repo as its root. Effort is **always passed explicitly** — the model's/config's own default may differ, so relying on it wouldn't deliver the mode's contract.
+
+Model note: GPT-5.6 ships as `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna`; Sol is the deep-reasoning tier used here. Requires codex-cli ≥ 0.144 — on a "requires a newer version of Codex" 400, run `codex update` and retry.
 
 ## Step 3 — Triage and adjudicate (claim by claim)
 
