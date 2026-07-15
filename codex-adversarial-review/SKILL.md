@@ -43,20 +43,20 @@ Map the user's argument to exactly one diff source (default `--uncommitted` if n
 
 Engine (`--engine`, default `orchestrated`):
 - `orchestrated` — this script fans out one `codex exec` per angle. Deterministic (exact angle count/caps/dedup), cheaper (no main-agent overhead), robust structured output. The Claude **`ultra` workflow** analog. Default; use for reliability + cost.
-- `native` — ONE `codex exec` drives the fan-out through Codex's own `spawn_agent`/`wait_agent` sub-agents (verified working, incl. gpt-5.5 @ high). The Claude **inline `/code-review`** analog: one process, model-driven. Non-deterministic spawn count + main-agent token overhead; needs a capable main model (gpt-5.5 — the mini fumbles the spawn protocol) and runs non-`--ephemeral` under `--full-auto`. **Security:** native needs workspace-write (Codex's multi-agent runtime persists rollouts; read-only breaks spawn), so do NOT run `native` on untrusted code — use `orchestrated` (read-only) for that. Use `native` when you want the single-process/native-subagent architecture on code you trust.
+- `native` — ONE `codex exec` drives the fan-out through Codex's own `spawn_agent`/`wait_agent` sub-agents (verified working, incl. gpt-5.5 @ high; default now gpt-5.6-sol). The Claude **inline `/code-review`** analog: one process, model-driven. Non-deterministic spawn count + main-agent token overhead; needs a capable main model (gpt-5.6-sol or gpt-5.5 — the mini fumbles the spawn protocol) and runs non-`--ephemeral` under `--full-auto`. **Security:** native needs workspace-write (Codex's multi-agent runtime persists rollouts; read-only breaks spawn), so do NOT run `native` on untrusted code — use `orchestrated` (read-only) for that. Use `native` when you want the single-process/native-subagent architecture on code you trust.
 
 Cost/rigor flags (surface these when the user is cost-conscious — they are):
 - `-e <tier>` low|medium|high|xhigh|max (default high) — drives angle count + caps + whether sweep runs
 - `--verify-model gpt-5.4-mini` run verifiers on the cheap model
 - `-k N` verifier votes per candidate (default 1 = Claude-faithful; >1 keeps unless majority REFUTED — extra rigor, more cost)
-- `-m <model>` finder model (default gpt-5.5)
+- `-m <model>` finder model (default gpt-5.6-sol — Sol is the deep-reasoning tier of the GPT-5.6 family; requires codex-cli >= 0.144, on a "requires a newer version of Codex" 400 run `codex update`. Pass `-m gpt-5.5` to pin the previous model)
 - `--dry-run` print plan + call count, spend nothing
 
 **Always run `--dry-run` first if the user hasn't run this before or the diff is large**, and show them the planned call count before spending.
 
 ## Step 3 — Run (single Bash call)
 
-Set the Bash tool `timeout` generously — a full gpt-5.5 @ high run is minutes (600000+; more for big diffs or high `-k`). Run from the repo you want reviewed (`-C` defaults to cwd; pass `-C <path>` for a worktree/other repo).
+Set the Bash tool `timeout` generously — a full gpt-5.6-sol @ high run is minutes (600000+; more for big diffs or high `-k`). Run from the repo you want reviewed (`-C` defaults to cwd; pass `-C <path>` for a worktree/other repo).
 
 ```sh
 node ~/.codex/tools/adversarial-review.mjs <diff-source> [flags]

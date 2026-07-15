@@ -23,7 +23,7 @@
 //                     analog. Non-deterministic count; adds main-agent overhead.
 //   -e, --effort <low|medium|high|xhigh|max>   (default high)
 //   -C, --cd <dir>          repo root (default cwd)
-//   -m, --model <model>     finder/verifier model (default gpt-5.5)
+//   -m, --model <model>     finder/verifier model (default gpt-5.6-sol; needs codex-cli >= 0.144)
 //   --verify-model <model>  override verifier model (default = -m)
 //   -k, --votes <n>         verifier votes/candidate (default 1 = faithful; >1 keeps unless majority REFUTED)
 //   -j, --concurrency <n>   max parallel codex calls (default 6)
@@ -231,7 +231,7 @@ const CODEX_EFFORT = { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh
 
 // ==== args =================================================================
 const argv = process.argv.slice(2);
-const opt = { source: { kind: 'uncommitted' }, cd: process.cwd(), model: 'gpt-5.5', verifyModel: null, effort: 'high', votes: 1, concurrency: 6, out: null, dryRun: false, engine: 'orchestrated', noCap: false };
+const opt = { source: { kind: 'uncommitted' }, cd: process.cwd(), model: 'gpt-5.6-sol', verifyModel: null, effort: 'high', votes: 1, concurrency: 6, out: null, dryRun: false, engine: 'orchestrated', noCap: false };
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   const next = () => { const v = argv[++i]; if (v === undefined || (v.startsWith('-') && v !== '-')) fail(`${a} requires a value`); return v; };
