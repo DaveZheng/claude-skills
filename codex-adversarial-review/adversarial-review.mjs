@@ -31,10 +31,13 @@
 //   --dry-run               print plan + call count, spend nothing
 //   --no-cap                report EVERY verified finding, ignoring the tier's report cap
 //                           (finders' per-angle caps still apply; use for fix-everything passes)
+//   --resume <dir>          continue a killed orchestrated run from its artifact dir —
+//                           reuses diff.patch + candidates.json + streamed verify.jsonl,
+//                           re-running only what never completed
 //   -h, --help
 
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, appendFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -231,7 +234,7 @@ const CODEX_EFFORT = { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh
 
 // ==== args =================================================================
 const argv = process.argv.slice(2);
-const opt = { source: { kind: 'uncommitted' }, cd: process.cwd(), model: 'gpt-5.6-sol', verifyModel: null, effort: 'high', votes: 1, concurrency: 6, out: null, dryRun: false, engine: 'orchestrated', noCap: false };
+const opt = { source: { kind: 'uncommitted' }, cd: process.cwd(), model: 'gpt-5.6-sol', verifyModel: null, effort: 'high', votes: 1, concurrency: 6, out: null, dryRun: false, engine: 'orchestrated', noCap: false, resume: null };
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   const next = () => { const v = argv[++i]; if (v === undefined || (v.startsWith('-') && v !== '-')) fail(`${a} requires a value`); return v; };
@@ -249,6 +252,7 @@ for (let i = 0; i < argv.length; i++) {
     case '-o': case '--out': opt.out = next(); break;
     case '--dry-run': opt.dryRun = true; break;
     case '--no-cap': opt.noCap = true; break;
+    case '--resume': opt.resume = next(); break;
     case '-h': case '--help': printHelp(); process.exit(0);
     default: fail(`unknown argument: ${a} (try --help)`);
   }
@@ -258,6 +262,7 @@ if (!['orchestrated', 'native'].includes(opt.engine)) fail(`unknown engine: ${op
 if (!TIERS[opt.effort]) fail(`unknown effort: ${opt.effort}. valid: ${Object.keys(TIERS).join(', ')}`);
 if (!Number.isInteger(opt.votes) || opt.votes < 1) fail('--votes must be a positive integer');
 if (!Number.isInteger(opt.concurrency) || opt.concurrency < 1) fail('--concurrency must be a positive integer');
+if (opt.resume && (opt.engine !== 'orchestrated' || !existsSync(join(opt.resume, 'diff.patch')))) fail('--resume needs an orchestrated-run artifact dir containing diff.patch');
 const tier = TIERS[opt.effort];
 const codexEffort = CODEX_EFFORT[opt.effort];
 function fail(m) { console.error(`error: ${m}`); process.exit(2); }
@@ -449,7 +454,9 @@ function runNative(prompt, schema) {
 }
 
 // ==== run ==================================================================
-const { diff, label } = getDiff();
+const { diff, label } = opt.resume
+  ? { diff: readFileSync(join(opt.resume, 'diff.patch'), 'utf8'), label: `resume of ${opt.resume}` }
+  : getDiff();
 if (!diff.trim()) { console.error(`No changes to review (${label}).`); process.exit(0); }
 const diffKB = (Buffer.byteLength(diff) / 1024).toFixed(1);
 const finderAngles = tier.angles.map(k => ANGLES.find(a => a.key === k));
@@ -469,7 +476,7 @@ if (opt.dryRun) {
   else console.error(`\nDRY RUN — codex calls: ${opt.effort === 'low' ? 1 : finderAngles.length} find${tier.verify ? ` + ${opt.votes}×(#candidates) verify` : ''}${tier.sweep ? ' + 1 sweep + verify(sweep)' : ''}. Nothing spent.`);
   process.exit(0);
 }
-const outDir = opt.out || join(opt.cd, '.codex-review', new Date().toISOString().replace(/[:.]/g, '-'));
+const outDir = opt.resume || opt.out || join(opt.cd, '.codex-review', new Date().toISOString().replace(/[:.]/g, '-'));
 mkdirSync(outDir, { recursive: true });
 writeFileSync(join(outDir, 'diff.patch'), diff);
 
@@ -497,9 +504,14 @@ if (opt.effort === 'low') {
 }
 
 // stage 1 — one finder per angle
-console.error(`\n[1] find — ${finderAngles.length} angle finders...`);
+const candidatesPath = join(outDir, 'candidates.json');
+const resumedCandidates = opt.resume && existsSync(candidatesPath)
+  ? JSON.parse(readFileSync(candidatesPath, 'utf8'))
+  : null;
+if (resumedCandidates) console.error(`\n[1] find — skipped (resume: ${resumedCandidates.length} candidates from ${candidatesPath})`);
 let finderFailures = 0;
-const raw = await mapLimit(finderAngles, opt.concurrency, async (angle) => {
+if (!resumedCandidates) console.error(`\n[1] find — ${finderAngles.length} angle finders...`);
+const raw = resumedCandidates ? [] : await mapLimit(finderAngles, opt.concurrency, async (angle) => {
   const r = await codexExec(finderPrompt(angle, tier.perAngle, diff), FINDING_SCHEMA);
   if (!r.ok) { console.error(`   ! ${angle.key} failed: ${r.error}`); finderFailures++; return []; }
   const fs = (r.data.findings || []).slice(0, tier.perAngle).map(f => ({ ...f, kind: angle.kind }));
@@ -507,7 +519,7 @@ const raw = await mapLimit(finderAngles, opt.concurrency, async (angle) => {
   return fs;
 });
 // distinguish "review ran, found nothing" from "review could not run" (bad model, codex missing, etc.)
-if (finderFailures === finderAngles.length) fail(`all ${finderAngles.length} finders failed — review did not run (check model/codex/auth)`);
+if (!resumedCandidates && finderFailures === finderAngles.length) fail(`all ${finderAngles.length} finders failed — review did not run (check model/codex/auth)`);
 else if (finderFailures) warnings.push(`${finderFailures}/${finderAngles.length} finder angles failed — review coverage reduced`);
 
 // dedup candidates that point at the same line/mechanism, keeping the most
@@ -531,7 +543,9 @@ for (const f of raw.flat()) {
     : ((f.failure_scenario || '').length > (dup.failure_scenario || '').length ? f : dup);
   Object.assign(dup, keep); // mutate in place so array identity holds
 }
-candidates = candidates.map((f, i) => ({ id: i + 1, ...f }));
+candidates = resumedCandidates ?? candidates.map((f, i) => ({ id: i + 1, ...f }));
+// Crash-safety: a killed run must never cost the finder stage again.
+if (!resumedCandidates) writeFileSync(candidatesPath, JSON.stringify(candidates, null, 2));
 console.error(`   ${candidates.length} candidates after semantic dedup.`);
 
 // stage 2 — verify (3-state, keep CONFIRMED+PLAUSIBLE)
@@ -545,11 +559,19 @@ if (candidates.length) {
 // stage 3 — sweep (xhigh/max)
 if (tier.sweep) {
   console.error(`\n[3] sweep for gaps...`);
-  const r = await codexExec(sweepPrompt(kept, diff), FINDING_SCHEMA);
-  if (!r.ok) warnings.push(`sweep pass failed (${r.error}) — gap coverage reduced`);
-  const extra = (r.ok ? r.data.findings : [])
-    .filter(f => !kept.some(k => k.file === f.file && Math.abs((k.line || 0) - (f.line || 0)) <= 2 && summaryOverlap(k.summary, f.summary) >= 0.4))
-    .map((f, i) => ({ id: 1000 + i, kind: 'correctness', ...f }));
+  const sweepPath = join(outDir, 'sweep-candidates.json');
+  let extra;
+  if (opt.resume && existsSync(sweepPath)) {
+    extra = JSON.parse(readFileSync(sweepPath, 'utf8'));
+    console.error(`   resume: ${extra.length} sweep candidates reused from ${sweepPath}`);
+  } else {
+    const r = await codexExec(sweepPrompt(kept, diff), FINDING_SCHEMA);
+    if (!r.ok) warnings.push(`sweep pass failed (${r.error}) — gap coverage reduced`);
+    extra = (r.ok ? r.data.findings : [])
+      .filter(f => !kept.some(k => k.file === f.file && Math.abs((k.line || 0) - (f.line || 0)) <= 2 && summaryOverlap(k.summary, f.summary) >= 0.4))
+      .map((f, i) => ({ id: 1000 + i, kind: 'correctness', ...f }));
+    writeFileSync(sweepPath, JSON.stringify(extra, null, 2));
+  }
   console.error(`   sweep raised ${extra.length}; verifying...`);
   const ve = extra.length ? await verifyAll(extra) : [];
   kept = kept.concat(ve);
@@ -574,12 +596,29 @@ function summaryOverlap(a, b) { // Jaccard over content tokens (len ≥ 4)
   return inter / (A.size + B.size - inter);
 }
 async function verifyAll(cands) {
+  // Votes stream to verify.jsonl as they land, so a killed run resumes from
+  // the last completed verifier instead of re-buying the whole stage.
+  const votesPath = join(outDir, 'verify.jsonl');
+  const prior = existsSync(votesPath)
+    ? readFileSync(votesPath, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
+    : [];
+  const priorCount = new Map();
+  for (const v of prior) priorCount.set(v.id, (priorCount.get(v.id) || 0) + 1);
   const jobs = [];
-  for (const f of cands) for (let v = 0; v < opt.votes; v++) jobs.push(f);
-  const votes = await mapLimit(jobs, opt.concurrency, async (f) => {
+  for (const f of cands) {
+    const have = priorCount.get(f.id) || 0;
+    if (have > 0) priorCount.set(f.id, have - Math.min(have, opt.votes));
+    for (let v = have; v < opt.votes; v++) jobs.push(f);
+  }
+  const priorForThese = prior.filter(v => cands.some(f => f.id === v.id));
+  if (priorForThese.length) console.error(`   resume: ${priorForThese.length} verifier vote(s) reused from ${votesPath}`);
+  const fresh = await mapLimit(jobs, opt.concurrency, async (f) => {
     const r = await codexVerify(verifyPrompt(f, diff), VERDICT_SCHEMA);
-    return { id: f.id, verdict: r.ok ? r.data.verdict : 'PLAUSIBLE', errored: !r.ok };
+    const vote = { id: f.id, verdict: r.ok ? r.data.verdict : 'PLAUSIBLE', errored: !r.ok };
+    appendFileSync(votesPath, JSON.stringify(vote) + '\n');
+    return vote;
   });
+  const votes = priorForThese.concat(fresh);
   const byId = new Map(cands.map(f => [f.id, []]));
   for (const v of votes) byId.get(v.id).push(v);
   let unverified = 0;
