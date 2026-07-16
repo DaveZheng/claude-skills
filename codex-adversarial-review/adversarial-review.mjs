@@ -22,9 +22,18 @@
 //                     sub-agents (model-driven, one process) — the Claude inline-review
 //                     analog. Non-deterministic count; adds main-agent overhead.
 //   -e, --effort <low|medium|high|xhigh|max>   (default high)
+//       Selects the tier (angles, per-angle caps, verify bias, sweep) AND the finder
+//       reasoning effort. Verifier effort is separate — see --verify-effort.
 //   -C, --cd <dir>          repo root (default cwd)
-//   -m, --model <model>     finder/verifier model (default gpt-5.6-sol; needs codex-cli >= 0.144)
-//   --verify-model <model>  override verifier model (default = -m)
+//   -m, --model <model>     finder model (default gpt-5.6-sol; needs codex-cli >= 0.144)
+//   --verify-model <model>  verifier model (default gpt-5.6-terra)
+//   --verify-effort <low|medium|high|xhigh|max>   verifier reasoning effort (default medium)
+//       Verify is the bulk of the spend (at xhigh, up to 80 verifier calls vs 10 finders),
+//       so it defaults to a cheaper model+effort than the finders. It is still the
+//       adversarial gate: weakening it further trades finding quality for cost in both
+//       directions (junk survives as PLAUSIBLE, real bugs get REFUTED). Raise both back to
+//       the finder tier (--verify-model gpt-5.6-sol --verify-effort high) when the gate
+//       matters more than the bill.
 //   -k, --votes <n>         verifier votes/candidate (default 1 = faithful; >1 keeps unless majority REFUTED)
 //   -j, --concurrency <n>   max parallel codex calls (default 6)
 //   -o, --out <dir>         artifact dir (default <repo>/.codex-review/<ts>)
@@ -234,7 +243,7 @@ const CODEX_EFFORT = { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh
 
 // ==== args =================================================================
 const argv = process.argv.slice(2);
-const opt = { source: { kind: 'uncommitted' }, cd: process.cwd(), model: 'gpt-5.6-sol', verifyModel: null, effort: 'high', votes: 1, concurrency: 6, out: null, dryRun: false, engine: 'orchestrated', noCap: false, resume: null };
+const opt = { source: { kind: 'uncommitted' }, cd: process.cwd(), model: 'gpt-5.6-sol', verifyModel: 'gpt-5.6-terra', effort: 'high', verifyEffort: 'medium', votes: 1, concurrency: 6, out: null, dryRun: false, engine: 'orchestrated', noCap: false, resume: null };
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   const next = () => { const v = argv[++i]; if (v === undefined || (v.startsWith('-') && v !== '-')) fail(`${a} requires a value`); return v; };
@@ -247,6 +256,7 @@ for (let i = 0; i < argv.length; i++) {
     case '-C': case '--cd': opt.cd = next(); break;
     case '-m': case '--model': opt.model = next(); break;
     case '--verify-model': opt.verifyModel = next(); break;
+    case '--verify-effort': opt.verifyEffort = next(); break;
     case '-k': case '--votes': opt.votes = parseInt(next(), 10); break;
     case '-j': case '--concurrency': opt.concurrency = parseInt(next(), 10); break;
     case '-o': case '--out': opt.out = next(); break;
@@ -257,14 +267,15 @@ for (let i = 0; i < argv.length; i++) {
     default: fail(`unknown argument: ${a} (try --help)`);
   }
 }
-opt.verifyModel ??= opt.model;
 if (!['orchestrated', 'native'].includes(opt.engine)) fail(`unknown engine: ${opt.engine}. valid: orchestrated, native`);
 if (!TIERS[opt.effort]) fail(`unknown effort: ${opt.effort}. valid: ${Object.keys(TIERS).join(', ')}`);
+if (!CODEX_EFFORT[opt.verifyEffort]) fail(`unknown verify effort: ${opt.verifyEffort}. valid: ${Object.keys(CODEX_EFFORT).join(', ')}`);
 if (!Number.isInteger(opt.votes) || opt.votes < 1) fail('--votes must be a positive integer');
 if (!Number.isInteger(opt.concurrency) || opt.concurrency < 1) fail('--concurrency must be a positive integer');
 if (opt.resume && (opt.engine !== 'orchestrated' || !existsSync(join(opt.resume, 'diff.patch')))) fail('--resume needs an orchestrated-run artifact dir containing diff.patch');
 const tier = TIERS[opt.effort];
 const codexEffort = CODEX_EFFORT[opt.effort];
+const verifyEffort = CODEX_EFFORT[opt.verifyEffort];
 function fail(m) { console.error(`error: ${m}`); process.exit(2); }
 function printHelp() { console.log(readFileSync(new URL(import.meta.url)).toString().split('\n').filter(l => l.startsWith('//')).map(l => l.slice(3)).join('\n')); }
 
@@ -300,12 +311,14 @@ function getDiff() {
 const SCRATCH = mkdtempSync(join(tmpdir(), 'codex-review-'));
 process.on('exit', () => { try { rmSync(SCRATCH, { recursive: true, force: true }); } catch {} });
 let seq = 0;
-function codexExec(prompt, schema) {
+// Finders and verifiers differ only in model + reasoning effort, so the stage picks both:
+// codexExec(...) = finder/sweep (opt.model @ codexEffort), codexVerify(...) = verifier.
+function codexExec(prompt, schema, model = opt.model, effort = codexEffort) {
   return new Promise((resolve) => {
     const id = ++seq;
     const outFile = join(SCRATCH, `o-${id}.json`), schemaFile = join(SCRATCH, `s-${id}.json`);
     writeFileSync(schemaFile, JSON.stringify(schema));
-    const args = ['exec', '--ephemeral', '--color', 'never', '-s', 'read-only', '-C', opt.cd, '-m', opt.model, '-c', `model_reasoning_effort="${codexEffort}"`, '--output-schema', schemaFile, '-o', outFile, '-'];
+    const args = ['exec', '--ephemeral', '--color', 'never', '-s', 'read-only', '-C', opt.cd, '-m', model, '-c', `model_reasoning_effort="${effort}"`, '--output-schema', schemaFile, '-o', outFile, '-'];
     const child = spawn('codex', args, { stdio: ['pipe', 'ignore', 'pipe'] });
     let stderr = '';
     child.stderr.on('data', d => { stderr += d; });
@@ -318,24 +331,7 @@ function codexExec(prompt, schema) {
     child.stdin.end(prompt);
   });
 }
-function codexVerify(prompt, schema) { // verifier can use --verify-model
-  return new Promise((resolve) => {
-    const id = ++seq;
-    const outFile = join(SCRATCH, `o-${id}.json`), schemaFile = join(SCRATCH, `s-${id}.json`);
-    writeFileSync(schemaFile, JSON.stringify(schema));
-    const args = ['exec', '--ephemeral', '--color', 'never', '-s', 'read-only', '-C', opt.cd, '-m', opt.verifyModel, '-c', `model_reasoning_effort="${codexEffort}"`, '--output-schema', schemaFile, '-o', outFile, '-'];
-    const child = spawn('codex', args, { stdio: ['pipe', 'ignore', 'pipe'] });
-    let stderr = '';
-    child.stderr.on('data', d => { stderr += d; });
-    child.on('error', e => resolve({ ok: false, error: `spawn: ${e.message}` }));
-    child.on('close', code => {
-      if (code !== 0) return resolve({ ok: false, error: `exit ${code}: ${stderr.trim().slice(-300)}` });
-      try { resolve({ ok: true, data: JSON.parse(readFileSync(outFile, 'utf8')) }); }
-      catch (e) { resolve({ ok: false, error: `bad JSON: ${e.message}` }); }
-    });
-    child.stdin.end(prompt);
-  });
-}
+const codexVerify = (prompt, schema) => codexExec(prompt, schema, opt.verifyModel, verifyEffort);
 async function mapLimit(items, limit, fn) {
   const out = new Array(items.length); let i = 0;
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
@@ -464,12 +460,12 @@ const finderAngles = tier.angles.map(k => ANGLES.find(a => a.key === k));
 const nativeMulti = opt.engine === 'native' && opt.effort !== 'low';
 console.error(`# code-review (Codex 1:1 port) — ${opt.effort} · engine: ${opt.engine}`);
 console.error(`  source:  ${label}  (${diffKB} KB)`);
-console.error(`  model:   ${opt.model}${nativeMulti ? '' : ` (verify ${opt.verifyModel})`} @ ${codexEffort}`);
+console.error(`  model:   ${opt.model} @ ${codexEffort}${nativeMulti ? '' : `  ·  verify ${opt.verifyModel} @ ${verifyEffort}`}`);
 console.error(`  plan:    ${opt.effort === 'low' ? '1 diff pass, no verify'
   : nativeMulti ? `1 codex agent drives ${finderAngles.length} spawn_agent finders → verify${tier.sweep ? ' → sweep' : ''}`
   : `${finderAngles.length} angle finders → ${opt.votes}-vote 3-state verify${tier.sweep ? ' → sweep' : ''}`} → ${opt.noCap ? 'ALL verified (--no-cap)' : `≤${tier.findingsCap}`}`);
 if (nativeMulti && opt.votes > 1) console.error(`  note:    --votes ${opt.votes} ignored in native engine (Codex drives 1-vote verify).`);
-if (nativeMulti && opt.verifyModel !== opt.model) console.error(`  note:    --verify-model ignored in native engine (sub-agents inherit the main model).`);
+if (nativeMulti) console.error(`  note:    --verify-model/--verify-effort ignored in native engine (sub-agents inherit the main model + effort).`);
 
 if (opt.dryRun) {
   if (nativeMulti) console.error(`\nDRY RUN — 1 codex exec (main) that spawns ~${finderAngles.length} finder + N verifier sub-agents natively. Model-driven, non-deterministic count. Nothing spent.`);
@@ -636,7 +632,7 @@ async function verifyAll(cands) {
 function writeReport(findings, nCand) {
   // findings.json matches ReportFindings input: { level, findings:[{file,line,summary,failure_scenario,verdict}] }
   const payload = { level: opt.effort, findings: findings.map(({ file, line, summary, failure_scenario, verdict, unverified }) => ({ file, line, summary, failure_scenario, ...(verdict && !unverified ? { verdict } : {}) })) };
-  const L = [`# Code review (Codex 1:1 port) — ${opt.effort}`, '', `- **Source:** ${label}`, `- **Model:** ${opt.model} @ ${codexEffort} · **candidates:** ${nCand} → **findings:** ${findings.length} (${opt.noCap ? 'uncapped' : `cap ${tier.findingsCap}`})`, ''];
+  const L = [`# Code review (Codex 1:1 port) — ${opt.effort}`, '', `- **Source:** ${label}`, `- **Model:** ${opt.model} @ ${codexEffort}${opt.engine === 'native' ? '' : ` · **verify:** ${opt.verifyModel} @ ${verifyEffort}`} · **candidates:** ${nCand} → **findings:** ${findings.length} (${opt.noCap ? 'uncapped' : `cap ${tier.findingsCap}`})`, ''];
   if (warnings.length) { L.push(`> ⚠ ${warnings.length} run warning(s) — results may be incomplete:`); for (const w of warnings) L.push(`> - ${w}`); L.push(''); }
   if (!findings.length) L.push('No findings survived verification.');
   for (const f of findings) {

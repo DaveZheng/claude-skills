@@ -1,7 +1,7 @@
 ---
 name: codex-adversarial-review
 description: Run an adversarial, multi-agent code review on OpenAI Codex instead of Claude — find → adversarially verify → synthesize, mirroring /code-review ultra's shape. All review reasoning runs on `codex exec` (OpenAI credits); Claude only launches the orchestrator and triages the result, so Claude-token cost is minimal. Use to review the current diff, a branch, or a commit while divesting review spend from Anthropic. Supports --uncommitted / --base / --commit and cost-tuning flags.
-argument-hint: "[--uncommitted | --base <branch> | --commit <sha>] [-k N] [--verify-model M] [-d dims]"
+argument-hint: "[--uncommitted | --base <branch> | --commit <sha>] [-k N] [--verify-model M] [--verify-effort E] [-d dims]"
 ---
 
 You are launching an **adversarial code review that runs on OpenAI Codex, not Claude**. The heavy reasoning (N dimension-finders + K skeptics per finding + synthesis) all happens inside `codex exec` calls spawned by an orchestrator script. Your job is only to: pick the diff source, run the orchestrator, then triage its output for the user. Keep your own token use lean — the point of this skill is to move review spend off Anthropic.
@@ -45,12 +45,17 @@ Engine (`--engine`, default `orchestrated`):
 - `orchestrated` — this script fans out one `codex exec` per angle. Deterministic (exact angle count/caps/dedup), cheaper (no main-agent overhead), robust structured output. The Claude **`ultra` workflow** analog. Default; use for reliability + cost.
 - `native` — ONE `codex exec` drives the fan-out through Codex's own `spawn_agent`/`wait_agent` sub-agents (verified working, incl. gpt-5.5 @ high; default now gpt-5.6-sol). The Claude **inline `/code-review`** analog: one process, model-driven. Non-deterministic spawn count + main-agent token overhead; needs a capable main model (gpt-5.6-sol or gpt-5.5 — the mini fumbles the spawn protocol) and runs non-`--ephemeral` under `--full-auto`. **Security:** native needs workspace-write (Codex's multi-agent runtime persists rollouts; read-only breaks spawn), so do NOT run `native` on untrusted code — use `orchestrated` (read-only) for that. Use `native` when you want the single-process/native-subagent architecture on code you trust.
 
+**Stage tiering (the default).** Finders and verifiers run on different models + efforts, because verify is where the spend is: at `xhigh` it's up to 80 verifier calls against 10 finders. Defaults are **find = gpt-5.6-sol @ high, verify = gpt-5.6-terra @ medium** — deep reasoning where candidates are discovered, a cheaper tier for the gate. Applies to `orchestrated` only; `native` sub-agents inherit the main model + effort.
+
 Cost/rigor flags (surface these when the user is cost-conscious — they are):
-- `-e <tier>` low|medium|high|xhigh|max (default high) — drives angle count + caps + whether sweep runs
-- `--verify-model gpt-5.4-mini` run verifiers on the cheap model
+- `-e <tier>` low|medium|high|xhigh|max (default high) — drives angle count + caps + whether sweep runs, **and** finder effort
+- `--verify-effort <tier>` verifier reasoning effort (default medium) — independent of `-e`
+- `--verify-model <model>` verifier model (default gpt-5.6-terra; `gpt-5.4-mini` is cheaper still)
 - `-k N` verifier votes per candidate (default 1 = Claude-faithful; >1 keeps unless majority REFUTED — extra rigor, more cost)
 - `-m <model>` finder model (default gpt-5.6-sol — Sol is the deep-reasoning tier of the GPT-5.6 family; requires codex-cli >= 0.144, on a "requires a newer version of Codex" 400 run `codex update`. Pass `-m gpt-5.5` to pin the previous model)
 - `--dry-run` print plan + call count, spend nothing
+
+Verify is the adversarial gate, not a formality — a cheaper verifier is a weaker gate in **both** directions (junk survives as PLAUSIBLE, real bugs get REFUTED), and under `--no-cap` everything that survives becomes work. When the gate matters more than the bill, raise it back to the finder tier: `--verify-model gpt-5.6-sol --verify-effort high`.
 
 **Always run `--dry-run` first if the user hasn't run this before or the diff is large**, and show them the planned call count before spending.
 
