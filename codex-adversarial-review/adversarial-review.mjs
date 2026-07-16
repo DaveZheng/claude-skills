@@ -21,9 +21,11 @@
 //       native:       ONE codex exec drives the fan-out via codex's own spawn_agent
 //                     sub-agents (model-driven, one process) — the Claude inline-review
 //                     analog. Non-deterministic count; adds main-agent overhead.
-//   -e, --effort <low|medium|high|xhigh|max>   (default high)
+//   -e, --effort <low|medium|high|xhigh|max>   (default medium)
 //       Selects the tier (angles, per-angle caps, verify bias, sweep) AND the finder
 //       reasoning effort. Verifier effort is separate — see --verify-effort.
+//       medium and high run the same 8 angles; they differ in the verify bias —
+//       medium optimizes precision (fewer, surer findings), high optimizes recall.
 //   -C, --cd <dir>          repo root (default cwd)
 //   -m, --model <model>     finder model (default gpt-5.6-sol; needs codex-cli >= 0.144)
 //   --verify-model <model>  verifier model (default gpt-5.6-terra)
@@ -245,7 +247,7 @@ const CODEX_EFFORT = { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh
 
 // ==== args =================================================================
 const argv = process.argv.slice(2);
-const opt = { source: { kind: 'uncommitted' }, cd: process.cwd(), model: 'gpt-5.6-sol', verifyModel: 'gpt-5.6-terra', effort: 'high', verifyEffort: 'medium', votes: 1, concurrency: 6, out: null, dryRun: false, engine: 'orchestrated', noCap: false, resume: null };
+const opt = { source: { kind: 'uncommitted' }, cd: process.cwd(), model: 'gpt-5.6-sol', verifyModel: 'gpt-5.6-terra', effort: 'medium', verifyEffort: 'medium', votes: 1, concurrency: 6, out: null, dryRun: false, engine: 'orchestrated', noCap: false, resume: null };
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   const next = () => { const v = argv[++i]; if (v === undefined || (v.startsWith('-') && v !== '-')) fail(`${a} requires a value`); return v; };
@@ -657,7 +659,9 @@ function writeReport(findings, nCand) {
   const payload = { level: opt.effort, findings: findings.map(({ file, line, summary, failure_scenario, verdict, unverified }) => ({ file, line, summary, failure_scenario, ...(verdict && !unverified ? { verdict } : {}) })) };
   const L = [`# Code review (Codex 1:1 port) — ${opt.effort}`, '', `- **Source:** ${label}`, `- **Model:** ${opt.model} @ ${codexEffort}${usesSeparateVerifier ? ` · **verify:** ${opt.verifyModel} @ ${verifyEffort}` : ''} · **candidates:** ${nCand} → **findings:** ${findings.length} (${opt.noCap ? 'uncapped' : `cap ${tier.findingsCap}`})`, ''];
   if (warnings.length) { L.push(`> ⚠ ${warnings.length} run warning(s) — results may be incomplete:`); for (const w of warnings) L.push(`> - ${w}`); L.push(''); }
-  if (!findings.length) L.push('No findings survived verification.');
+  // `low` runs no verify stage, so claiming nothing "survived verification" credits the run
+  // with a gate it never had. native verifies via spawn_agent, so it keeps the stronger wording.
+  if (!findings.length) L.push(tier.verify ? 'No findings survived verification.' : 'No findings.');
   for (const f of findings) {
     L.push(`## ${f.unverified ? '[UNVERIFIED] ' : f.verdict ? `[${f.verdict}] ` : ''}${f.summary}`);
     L.push(`\`${f.file}:${f.line}\`${f.kind ? ` · _${f.kind}_` : ''}`, '', `**Failure scenario:** ${f.failure_scenario}`, '');

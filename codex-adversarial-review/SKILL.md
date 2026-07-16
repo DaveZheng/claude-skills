@@ -48,7 +48,7 @@ Engine (`--engine`, default `orchestrated`):
 **Stage tiering (the default).** Finders and verifiers run on different models + efforts, because verify is where the spend is: at `xhigh` it's up to 88 verifier calls against 11 finder-family calls (10 angles + the sweep finder, whose extra candidates are verified too). Defaults are **find = gpt-5.6-sol @ high, verify = gpt-5.6-terra @ medium** — deep reasoning where candidates are discovered, a cheaper tier for the gate. Applies to `orchestrated` with a verify stage; `low` has none, and `native` sub-agents inherit the main model + effort.
 
 Cost/rigor flags (surface these when the user is cost-conscious — they are):
-- `-e <tier>` low|medium|high|xhigh|max (default high) — drives angle count + caps + whether sweep runs, **and** finder effort
+- `-e <tier>` low|medium|high|xhigh|max (default medium) — drives angle count + caps + whether sweep runs, **and** finder effort. medium and high share the same 8 angles and differ only in verify bias (medium = precision, high = recall), so reach for `high` when a missed bug costs more than a false positive.
 - `--verify-effort <tier>` verifier reasoning effort (default medium) — independent of `-e`
 - `--verify-model <model>` verifier model (default gpt-5.6-terra; `gpt-5.4-mini` is cheaper still)
 - `-k N` verifier votes per candidate (default 1 = Claude-faithful; >1 keeps unless majority REFUTED — extra rigor, more cost)
