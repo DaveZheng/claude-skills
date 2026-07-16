@@ -28,7 +28,7 @@
 //   -m, --model <model>     finder model (default gpt-5.6-sol; needs codex-cli >= 0.144)
 //   --verify-model <model>  verifier model (default gpt-5.6-terra)
 //   --verify-effort <low|medium|high|xhigh|max>   verifier reasoning effort (default medium)
-//       Verify is the bulk of the spend (at xhigh, up to 80 verifier calls vs 10 finders),
+//       Verify is the bulk of the spend (at xhigh, up to 88 verifier calls vs 11 finders),
 //       so it defaults to a cheaper model+effort than the finders. It is still the
 //       adversarial gate: weakening it further trades finding quality for cost in both
 //       directions (junk survives as PLAUSIBLE, real bugs get REFUTED). Raise both back to
@@ -239,7 +239,9 @@ const TIERS = {
   xhigh:  { angles: ['A','B','C','D','E', ...CLEANUP5],    perAngle: 8, findingsCap: 15, verify: jOo,    sweep: true,  bias: 'xhigh',  recallKeep: true },
   max:    { angles: ['A','B','C','D','E', ...CLEANUP5],    perAngle: 8, findingsCap: 15, verify: jOo,    sweep: true,  bias: 'max',    recallKeep: true },
 };
-const CODEX_EFFORT = { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'xhigh' };
+// The API enum is none|minimal|low|medium|high|xhigh|max — `max` is a real, distinct level,
+// so the `max` tier must send it. Mapping max→xhigh made `-e max` an alias of `-e xhigh`.
+const CODEX_EFFORT = { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' };
 
 // ==== args =================================================================
 const argv = process.argv.slice(2);
@@ -267,15 +269,20 @@ for (let i = 0; i < argv.length; i++) {
     default: fail(`unknown argument: ${a} (try --help)`);
   }
 }
+// hasOwn, not truthiness: `--effort constructor` resolves up the prototype chain, passes a
+// bare `TIERS[x]` check, and reaches codex as a function string.
 if (!['orchestrated', 'native'].includes(opt.engine)) fail(`unknown engine: ${opt.engine}. valid: orchestrated, native`);
-if (!TIERS[opt.effort]) fail(`unknown effort: ${opt.effort}. valid: ${Object.keys(TIERS).join(', ')}`);
-if (!CODEX_EFFORT[opt.verifyEffort]) fail(`unknown verify effort: ${opt.verifyEffort}. valid: ${Object.keys(CODEX_EFFORT).join(', ')}`);
+if (!Object.hasOwn(TIERS, opt.effort)) fail(`unknown effort: ${opt.effort}. valid: ${Object.keys(TIERS).join(', ')}`);
+if (!Object.hasOwn(CODEX_EFFORT, opt.verifyEffort)) fail(`unknown verify effort: ${opt.verifyEffort}. valid: ${Object.keys(CODEX_EFFORT).join(', ')}`);
 if (!Number.isInteger(opt.votes) || opt.votes < 1) fail('--votes must be a positive integer');
 if (!Number.isInteger(opt.concurrency) || opt.concurrency < 1) fail('--concurrency must be a positive integer');
 if (opt.resume && (opt.engine !== 'orchestrated' || !existsSync(join(opt.resume, 'diff.patch')))) fail('--resume needs an orchestrated-run artifact dir containing diff.patch');
 const tier = TIERS[opt.effort];
 const codexEffort = CODEX_EFFORT[opt.effort];
 const verifyEffort = CODEX_EFFORT[opt.verifyEffort];
+// Only these runs have a verifier to report: `low` has no verify stage, and native sub-agents
+// inherit the main model+effort. Reporting a verifier the run never used overstates its rigor.
+const usesSeparateVerifier = opt.engine !== 'native' && !!tier.verify;
 function fail(m) { console.error(`error: ${m}`); process.exit(2); }
 function printHelp() { console.log(readFileSync(new URL(import.meta.url)).toString().split('\n').filter(l => l.startsWith('//')).map(l => l.slice(3)).join('\n')); }
 
@@ -323,6 +330,9 @@ function codexExec(prompt, schema, model = opt.model, effort = codexEffort) {
     let stderr = '';
     child.stderr.on('data', d => { stderr += d; });
     child.on('error', e => resolve({ ok: false, error: `spawn: ${e.message}` }));
+    // codex rejecting a prompt larger than the pipe buffer exits before draining stdin; without
+    // this the EPIPE is an unhandled stream error that takes down the whole run mid-stage.
+    child.stdin.on('error', e => resolve({ ok: false, error: `stdin: ${e.message}` }));
     child.on('close', code => {
       if (code !== 0) return resolve({ ok: false, error: `exit ${code}: ${stderr.trim().slice(-300)}` });
       try { resolve({ ok: true, data: JSON.parse(readFileSync(outFile, 'utf8')) }); }
@@ -460,7 +470,7 @@ const finderAngles = tier.angles.map(k => ANGLES.find(a => a.key === k));
 const nativeMulti = opt.engine === 'native' && opt.effort !== 'low';
 console.error(`# code-review (Codex 1:1 port) — ${opt.effort} · engine: ${opt.engine}`);
 console.error(`  source:  ${label}  (${diffKB} KB)`);
-console.error(`  model:   ${opt.model} @ ${codexEffort}${nativeMulti ? '' : `  ·  verify ${opt.verifyModel} @ ${verifyEffort}`}`);
+console.error(`  model:   ${opt.model} @ ${codexEffort}${usesSeparateVerifier ? `  ·  verify ${opt.verifyModel} @ ${verifyEffort}` : ''}`);
 console.error(`  plan:    ${opt.effort === 'low' ? '1 diff pass, no verify'
   : nativeMulti ? `1 codex agent drives ${finderAngles.length} spawn_agent finders → verify${tier.sweep ? ' → sweep' : ''}`
   : `${finderAngles.length} angle finders → ${opt.votes}-vote 3-state verify${tier.sweep ? ' → sweep' : ''}`} → ${opt.noCap ? 'ALL verified (--no-cap)' : `≤${tier.findingsCap}`}`);
@@ -595,9 +605,16 @@ async function verifyAll(cands) {
   // Votes stream to verify.jsonl as they land, so a killed run resumes from
   // the last completed verifier instead of re-buying the whole stage.
   const votesPath = join(outDir, 'verify.jsonl');
-  const prior = existsSync(votesPath)
+  const all = existsSync(votesPath)
     ? readFileSync(votesPath, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
     : [];
+  // A vote is only reusable if the same verifier produced it. Resuming with a different
+  // --verify-model/--verify-effort (or resuming a run from before votes recorded either)
+  // must re-verify: blending tiers would publish one report attributing every vote to the
+  // current one. Stale votes stay in the file; they're filtered, not trusted.
+  const prior = all.filter(v => v.model === opt.verifyModel && v.effort === verifyEffort);
+  const stale = all.length - prior.length;
+  if (stale) console.error(`   resume: ${stale} vote(s) from a different verifier tier discarded — re-verifying`);
   const priorCount = new Map();
   for (const v of prior) priorCount.set(v.id, (priorCount.get(v.id) || 0) + 1);
   const jobs = [];
@@ -610,7 +627,7 @@ async function verifyAll(cands) {
   if (priorForThese.length) console.error(`   resume: ${priorForThese.length} verifier vote(s) reused from ${votesPath}`);
   const fresh = await mapLimit(jobs, opt.concurrency, async (f) => {
     const r = await codexVerify(verifyPrompt(f, diff), VERDICT_SCHEMA);
-    const vote = { id: f.id, verdict: r.ok ? r.data.verdict : 'PLAUSIBLE', errored: !r.ok };
+    const vote = { id: f.id, verdict: r.ok ? r.data.verdict : 'PLAUSIBLE', errored: !r.ok, model: opt.verifyModel, effort: verifyEffort };
     appendFileSync(votesPath, JSON.stringify(vote) + '\n');
     return vote;
   });
@@ -626,13 +643,19 @@ async function verifyAll(cands) {
     if (f.unverified) unverified++;
     return refuted < Math.floor(opt.votes / 2) + 1; // majority-REFUTED kills (with -k 1, any REFUTED kills)
   });
+  // Every verifier erroring means the gate never ran, so every candidate "survives" unjudged —
+  // a fail-open that publishes unreviewed candidates as findings under a green exit code. A bad
+  // --verify-model/--verify-effort lands here, so fail hard like the all-finders-failed check.
+  if (cands.length && unverified === cands.length) {
+    fail(`every verifier errored — the review gate did not run (check --verify-model / --verify-effort / codex auth)`);
+  }
   if (unverified) warnings.push(`${unverified} finding(s) could not be verified (verifier errored) — marked UNVERIFIED`);
   return survivors;
 }
 function writeReport(findings, nCand) {
   // findings.json matches ReportFindings input: { level, findings:[{file,line,summary,failure_scenario,verdict}] }
   const payload = { level: opt.effort, findings: findings.map(({ file, line, summary, failure_scenario, verdict, unverified }) => ({ file, line, summary, failure_scenario, ...(verdict && !unverified ? { verdict } : {}) })) };
-  const L = [`# Code review (Codex 1:1 port) — ${opt.effort}`, '', `- **Source:** ${label}`, `- **Model:** ${opt.model} @ ${codexEffort}${opt.engine === 'native' ? '' : ` · **verify:** ${opt.verifyModel} @ ${verifyEffort}`} · **candidates:** ${nCand} → **findings:** ${findings.length} (${opt.noCap ? 'uncapped' : `cap ${tier.findingsCap}`})`, ''];
+  const L = [`# Code review (Codex 1:1 port) — ${opt.effort}`, '', `- **Source:** ${label}`, `- **Model:** ${opt.model} @ ${codexEffort}${usesSeparateVerifier ? ` · **verify:** ${opt.verifyModel} @ ${verifyEffort}` : ''} · **candidates:** ${nCand} → **findings:** ${findings.length} (${opt.noCap ? 'uncapped' : `cap ${tier.findingsCap}`})`, ''];
   if (warnings.length) { L.push(`> ⚠ ${warnings.length} run warning(s) — results may be incomplete:`); for (const w of warnings) L.push(`> - ${w}`); L.push(''); }
   if (!findings.length) L.push('No findings survived verification.');
   for (const f of findings) {
