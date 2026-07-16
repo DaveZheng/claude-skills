@@ -64,6 +64,12 @@ node ~/.codex/tools/adversarial-review.mjs <diff-source> [flags]
 
 The script streams progress to stderr and prints the final markdown report to stdout. Artifacts (`review.md`, `findings.json`, `diff.patch`) land in `.codex-review/<timestamp>/`.
 
+**Diff size hard cap: ~1 MB.** Codex rejects turn inputs over 1,048,576 chars (`input_too_large`, code -32602) — every finder fails and the run dies with "all 10 finders failed". Check first: `git diff <base>...HEAD | wc -c`. Over the cap (or anywhere close — each finder prompt adds overhead on top of the diff):
+- **Review incrementally**: on iterative review-fix-review loops, later rounds should scope to the UNREVIEWED commits anyway — pass `--base <last-reviewed-sha>` (an ancestor SHA works: merge-base(HEAD, sha) = sha, so the diff is exactly the commits since). Earlier rounds already covered the rest.
+- Or split by area/commit-range into multiple runs.
+
+**Long runs + backgrounding.** These runs take from many minutes to hours (xhigh + big diff: 60-90 min). When launching from an agent harness with a background-task mechanism, the review command must BE the background task — foreground within it, output attached, nothing after it. Never nest `&` or redirect to `/dev/null` inside an already-backgrounded call: the wrapper "completes" instantly, the real run is orphaned with no completion signal. If that happens: `pkill -f adversarial-review.mjs`, then relaunch — or `--resume <dir>` if stages already persisted.
+
 ## Step 4 — Triage and report back
 
 The findings already survived Codex's own adversarial verification, but Codex can still hallucinate — **spot-check the load-bearing ones against the real code before presenting them as fact** (same discipline as `/confer-with-codex`). Then give the user:
